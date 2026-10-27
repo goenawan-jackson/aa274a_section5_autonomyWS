@@ -14,15 +14,15 @@ import typing as T
 
 class Navigator(BaseNavigator):
    
-    def __init__(self, kp, kpx: float, kpy: float, kdx: float, kdy: float,):
+    def __init__(self):
         # don't need to establish our own publishers/subscribers, since those are inherited from BaseNavigator
         super().__init__("navigator_node")
-        self.kp = kp;
+        self.kp = 2.0;
         self.V_PREV_THRES = 0.0001 
-        self.kpx = kpx
-        self.kpy = kpy
-        self.kdx = kdx
-        self.kdy = kdy
+        self.kpx = 2.0;
+        self.kpy = 2.0;
+        self.kdx = 2.0;
+        self.kdy = 2.0;
         
     def compute_heading_control(self, state: TurtleBotState, goal: TurtleBotState) -> TurtleBotControl:
         """ Compute only orientation target (used for NavMode.ALIGN and NavMode.Park)
@@ -56,18 +56,18 @@ class Navigator(BaseNavigator):
         dt = t - self.t_prev
         x = state.x;
         y = state.y;
-        th = state.th;
-        x_d = splev(t, self.path_x_spline, der=0)
-        y_d = splev(t, self.path_y_spline, der=0)
-        xd_d = splev(t, self.path_x_spline, der=1)
-        yd_d = splev(t, self.path_y_spline, der=1)
-        xdd_d = splev(t, self.path_x_spline, der=2)
-        ydd_d = splev(t, self.path_y_spline, der=2)
+        th = state.theta;
+        x_d = splev(t, plan.path_x_spline, der=0)
+        y_d = splev(t, plan.path_y_spline, der=0)
+        xd_d = splev(t, plan.path_x_spline, der=1)
+        yd_d = splev(t, plan.path_y_spline, der=1)
+        xdd_d = splev(t, plan.path_x_spline, der=2)
+        ydd_d = splev(t, plan.path_y_spline, der=2)
 
         ########## Code starts here ##########
         # avoid singularity
-        if abs(self.V_prev) < V_PREV_THRES:
-            self.V_prev = V_PREV_THRES
+        if abs(self.V_prev) < self.V_PREV_THRES:
+            self.V_prev = self.V_PREV_THRES
 
         xd = self.V_prev*np.cos(th)
         yd = self.V_prev*np.sin(th)
@@ -97,7 +97,7 @@ class Navigator(BaseNavigator):
         msg = TurtleBotControl()
         msg.v = V;
         msg.omega = om;
-        return V, om
+        return msg
     
     def compute_trajectory_plan(self,
         state: TurtleBotState,
@@ -122,23 +122,21 @@ class Navigator(BaseNavigator):
         x_goal_x = goal.x;
         x_goal_y = goal.y;
         
-        astar = AStar((0, 0), (horizon, horizon), (x_init_x, x_init_y), (x_goal_x, x_goal_y), occupancy)
-        astar.solve()
-        path = astar.path;
-        if not astar.solve() or path.length >= 4:
+        astar = AStar((x_init_x - horizon, x_init_y - horizon), (x_init_x + horizon, x_init_y + horizon), (x_init_x, x_init_y), (x_goal_x, x_goal_y), occupancy, resolution)
+        # astar.solve();
+        # path = astar.path;
+        if not astar.solve() or len(astar.path) < 4:
             return None
         
         self.reset()
         
         # smooth plan and get timesteps
-        path = np.asarray(path)
+        path = np.asarray(astar.path)
         ts = [0];
             
         for i in range(1, path.shape[0]):
-            ts.append(ts[i-1] + astar.distance(path[i, :], path[i-1, :]) / v_desired);
-                
-        print(str(ts))
-        
+            ts.append(ts[i-1] + (astar.distance(path[i, :], path[i-1, :]) / v_desired));
+                        
         path_x_spline = splrep(ts, path[:, 0], k = 3, s = spline_alpha)
         path_y_spline = splrep(ts, path[:, 1], k = 3, s = spline_alpha)
     
@@ -175,7 +173,7 @@ class AStar(object):
             self.cost_to_arrive[self.x_init] = 0
             self.est_cost_through[self.x_init] = self.heuristic(self.x_init)
 
-            self.path = self.reconstruct_path        # the final path as a list of states
+            self.path = None      # the final path as a list of states
 
         def is_free(self, x):
             """
@@ -188,6 +186,7 @@ class AStar(object):
             Hint: self.occupancy is a DetOccupancyGrid2D object, take a look at its methods for what might be
                 useful here
             """
+            x = np.asarray(x)
             if x[0] <= self.statespace_hi[0] and x[0] >= self.statespace_lo[0] and x[1] <= self.statespace_hi[1] and x[1] >= self.statespace_lo[1]:
                 return self.occupancy.is_free(x);
             
@@ -206,6 +205,7 @@ class AStar(object):
 
             HINT: This should take one line. Tuples can be converted to numpy arrays using np.array().
             """
+
             return np.linalg.norm(np.subtract(np.array(x2), np.array(x1)), ord = 2)
 
         def heuristic(self, x):
@@ -235,6 +235,7 @@ class AStar(object):
             Output:
                 A tuple that represents the closest point to x on the discrete state grid
             """
+            x = np.asarray(x)
             return (
                 self.resolution * round((x[0] - self.x_offset[0]) / self.resolution) + self.x_offset[0],
                 self.resolution * round((x[1] - self.x_offset[1]) / self.resolution) + self.x_offset[1],
@@ -289,7 +290,6 @@ class AStar(object):
             while current != self.x_init:
                 path.append(self.came_from[current])
                 current = path[-1]
-            self.path = path
             return list(reversed(path))
 
         def plot_path(self, fig_num=0, show_init_label=True):
@@ -341,7 +341,7 @@ class AStar(object):
                 x_current = self.find_best_est_cost_through()
                 
                 if x_current == self.x_goal: # final loop iteration will be when the last neighbor we're checking is the goal state
-                    self.reconstruct_path()
+                    self.path = self.reconstruct_path()
                     return True
                 
                 self.open_set.remove(x_current) # this state is no longer one we want to analyze again, must remove so that while loop can stop appropriately. note that this state was already in the open set from when it was first analyzed as a neighbor
